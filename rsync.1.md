@@ -551,6 +551,7 @@ has its own detailed description later in this manpage.
 --suffix=SUFFIX          backup suffix (default ~ w/o --backup-dir)
 --update, -u             skip files that are newer on the receiver
 --inplace                update destination files in-place
+--reflink=MODE           use copy-on-write clones for replacement files
 --append                 append data onto shorter files
 --append-verify          --append w/old data in file checksum
 --dirs, -d               transfer directories without recursing
@@ -1186,6 +1187,20 @@ sign) if you want the local shell to expand it.
     transfer will probably **not** continue the interrupted file.  As such, it
     is usually best to avoid combining this with[ `--inplace`](#opt) unless you
     have implemented manual steps to handle any interrupted in-progress files.
+
+0.  `--reflink=MODE`
+
+    This Linux-only option controls how rsync creates replacement files. With
+    `auto`, the receiver tries the `FICLONE` copy-on-write operation using the
+    existing destination file as the basis, and falls back to a regular
+    temporary file when cloning is unavailable. With `always`, the transfer
+    fails if the destination file does not exist or the clone cannot be made.
+    The normal rsync delta is applied to the clone, preserving matching data at
+    its existing offset and using range clones for matching data that moves
+    when the filesystem supports them. The completed file is then moved into
+    place as usual. This option does not affect new files, which have no
+    destination basis to clone. This option cannot be combined with
+    [`--inplace`](#opt).
 
 0.  `--inplace`
 

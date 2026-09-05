@@ -22,6 +22,10 @@
 #include "rsync.h"
 #include "inums.h"
 
+#ifdef __linux__
+#include <linux/fs.h>
+#endif
+
 extern int dry_run;
 extern int do_xfers;
 extern int am_root;
@@ -55,6 +59,7 @@ extern int checksum_seed;
 extern int whole_file;
 extern int inplace;
 extern int inplace_partial;
+extern int reflink_mode;
 extern int allowed_lull;
 extern int delay_updates;
 extern BOOL want_progress_now;
@@ -458,8 +463,51 @@ int open_tmpfile(char *fnametmp, const char *fname, struct file_struct *file)
 	return fd;
 }
 
+/* Seed a replacement file from the existing destination with a CoW clone.
+ * The receiver's basis is the only file descriptor available here that can
+ * represent the source contents; receive_data() then applies the normal
+ * rsync delta to the clone.  A missing basis cannot be reflinked. */
+static int reflink_tmpfile(int basis_fd, int output_fd)
+{
+#if defined(__linux__) && defined(FICLONE)
+	if (basis_fd >= 0 && ioctl(output_fd, FICLONE, basis_fd) == 0)
+		return 0;
+	if (reflink_mode == 2) {
+		if (basis_fd < 0)
+			errno = ENOENT;
+		return -1;
+	}
+#else
+	if (reflink_mode == 2)
+		errno = ENOTSUP;
+#endif
+	return reflink_mode == 2 ? -1 : 1;
+}
+
+/* Preserve a matched range at a different output offset when the filesystem
+ * supports range cloning.  A failed range clone is deliberately non-fatal:
+ * the caller still has the mapped basis bytes and can copy them normally. */
+static int reflink_range(int basis_fd, int output_fd, OFF_T source_offset,
+			 OFF_T dest_offset, OFF_T length)
+{
+#if defined(__linux__) && defined(FICLONERANGE)
+	struct file_clone_range range;
+
+	if (basis_fd < 0 || length <= 0)
+		return -1;
+	range.src_fd = basis_fd;
+	range.src_offset = source_offset;
+	range.src_length = length;
+	range.dest_offset = dest_offset;
+	return ioctl(output_fd, FICLONERANGE, &range) == 0 ? 0 : -1;
+#else
+	return -1;
+#endif
+}
+
 static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
-			const char *fname, int fd, struct file_struct *file, int inplace_sizing)
+			const char *fname, int fd, struct file_struct *file, int inplace_sizing,
+			int reflink_seeded)
 {
 	static char file_sum1[MAX_DIGEST_LEN];
 	struct map_struct *mapbuf;
@@ -611,7 +659,8 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 			rprintf(FINFO,
 				"chunk[%d] of size %ld at %s offset=%s%s\n",
 				i, (long)len, big_num(offset2), big_num(offset),
-				updating_basis_or_equiv && offset == offset2 ? " (seek)" : "");
+				(updating_basis_or_equiv || reflink_seeded) && offset == offset2
+				? " (seek)" : "");
 		}
 
 		if (mapbuf) {
@@ -621,13 +670,20 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 			sum_update(map, len);
 		}
 
-		if (updating_basis_or_equiv) {
-			if (offset == offset2 && fd != -1) {
-				if (skip_matched(fd, offset, map, len) < 0)
-					goto report_write_error;
-				offset += len;
-				continue;
-			}
+		if ((updating_basis_or_equiv || reflink_seeded) && offset == offset2 && fd != -1) {
+			if (skip_matched(fd, offset, map, len) < 0)
+				goto report_write_error;
+			offset += len;
+			continue;
+		}
+		if (reflink_seeded && fd != -1
+		 && reflink_range(fd_r, fd, offset2, offset, len) == 0) {
+			if (flush_write_file(fd) < 0)
+				goto report_write_error;
+			if (do_lseek(fd, offset + len, SEEK_SET) != offset + len)
+				goto report_write_error;
+			offset += len;
+			continue;
 		}
 		if (fd != -1 && map && write_file(fd, 0, offset, map, len) != (int)len)
 			goto report_write_error;
@@ -679,7 +735,7 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 
 static void discard_receive_data(int f_in, struct file_struct *file)
 {
-	receive_data(f_in, NULL, -1, 0, NULL, -1, file, 0);
+	receive_data(f_in, NULL, -1, 0, NULL, -1, file, 0, 0);
 }
 
 static void handle_delayed_updates(char *local_name)
@@ -794,7 +850,7 @@ static int gen_wants_ndx(int desired_ndx, int flist_num)
  * Receiver process runs on the same host as the generator process. */
 int recv_files(int f_in, int f_out, char *local_name)
 {
-	int fd1,fd2;
+	int fd1,fd2, reflink_seeded;
 	STRUCT_STAT st;
 	int iflags, xlen;
 	char *fname, fbuf[MAXPATHLEN];
@@ -1192,6 +1248,7 @@ int recv_files(int f_in, int f_out, char *local_name)
 		}
 
 		/* We now check to see if we are writing the file "inplace" */
+		reflink_seeded = 0;
 		if (inplace || one_inplace)  {
 			fnametmp = one_inplace ? partialptr : fname;
 			/* For any non-chrooted receiver (secure_relpath_active()),
@@ -1230,6 +1287,17 @@ int recv_files(int f_in, int f_out, char *local_name)
 		} else {
 			fnametmp = fnametmpbuf;
 			fd2 = open_tmpfile(fnametmp, fname, file);
+			if (fd2 != -1 && reflink_mode) {
+				int reflink_result = reflink_tmpfile(fd1, fd2);
+				if (reflink_result < 0) {
+					rsyserr(FERROR_XFER, errno, "reflink %s failed",
+						full_fname(fname));
+					close(fd2);
+					do_unlink_at(fnametmp);
+					fd2 = -1;
+				} else if (reflink_result == 0)
+					reflink_seeded = 1;
+			}
 			if (fd2 != -1)
 				cleanup_set(fnametmp, partialptr, file, fd1, fd2);
 		}
@@ -1263,7 +1331,8 @@ int recv_files(int f_in, int f_out, char *local_name)
 		}
 
 		/* recv file data */
-		recv_ok = receive_data(f_in, fnamecmp, fd1, st.st_size, fname, fd2, file, inplace || one_inplace);
+		recv_ok = receive_data(f_in, fnamecmp, fd1, st.st_size, fname, fd2, file,
+				inplace || one_inplace, reflink_seeded);
 
 		if (write_to_device) {
 			file->mode = write_devices_saved_mode;

@@ -1,5 +1,15 @@
 # NEWS for rsync 3.5.0 (13 Aug 2026)
 
+## Fork changes
+
+- Added `--reflink=auto|always` for Linux receivers. Replacement files are
+  seeded with `FICLONE` from the existing destination basis before the normal
+  rsync delta is applied. Matching data is retained in place when possible,
+  and matching ranges that move are reflinked with `FICLONERANGE` when the
+  filesystem permits it. `auto` falls back to a regular temporary file;
+  `always` reports an error if cloning is unavailable or no basis exists.
+  The option is rejected with `--inplace`.
+
 ## Changes in this version:
 
 ### Thanks!

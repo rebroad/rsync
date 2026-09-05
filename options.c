@@ -150,6 +150,8 @@ int modify_window = 0;
 int blocking_io = -1;
 int checksum_seed = 0;
 int inplace = 0;
+int reflink_mode = 0;
+char *reflink_mode_arg = NULL;
 int delay_updates = 0;
 int32 block_size = 0;
 time_t stop_at_utime = 0;
@@ -729,6 +731,7 @@ static struct poptOption long_options[] = {
   {"preallocate",      0,  POPT_ARG_NONE,   &preallocate_files, 0, 0, 0},
   {"inplace",          0,  POPT_ARG_VAL,    &inplace, 1, 0, 0 },
   {"no-inplace",       0,  POPT_ARG_VAL,    &inplace, 0, 0, 0 },
+  {"reflink",          0,  POPT_ARG_STRING, &reflink_mode_arg, 0, 0, "auto|always" },
   {"append",           0,  POPT_ARG_NONE,   0, OPT_APPEND, 0, 0 },
   {"append-verify",    0,  POPT_ARG_VAL,    &append_mode, 2, 0, 0 },
   {"no-append",        0,  POPT_ARG_VAL,    &append_mode, 0, 0, 0 },
@@ -2135,6 +2138,18 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 	else
 		compress_choice = NULL;
 
+	if (reflink_mode_arg) {
+		if (strcasecmp(reflink_mode_arg, "auto") == 0)
+			reflink_mode = 1;
+		else if (strcasecmp(reflink_mode_arg, "always") == 0)
+			reflink_mode = 2;
+		else {
+			snprintf(err_buf, sizeof err_buf,
+				 "--reflink must be either 'auto' or 'always'\n");
+			goto cleanup;
+		}
+	}
+
 	if (do_compression || do_compression_level != CLVL_NOT_SPECIFIED) {
 		if (!do_compression)
 			do_compression = CPRES_AUTO;
@@ -2573,6 +2588,11 @@ int parse_arguments(int *argc_p, const char ***argv_p)
 		partial_dir = tmp_partialdir;
 
 	if (inplace) {
+		if (reflink_mode) {
+			snprintf(err_buf, sizeof err_buf,
+				 "--reflink cannot be used with --inplace\n");
+			goto cleanup;
+		}
 #ifdef HAVE_FTRUNCATE
 		if (partial_dir) {
 			snprintf(err_buf, sizeof err_buf,
@@ -3137,6 +3157,9 @@ void server_options(char **args, int *argc_p)
 		/* Work around a bug in older rsync versions (on the remote side) for --inplace --sparse */
 		if (sparse_files && !whole_file && am_sender)
 			args[ac++] = "--no-W";
+	}
+	if (reflink_mode && am_sender) {
+		args[ac++] = reflink_mode == 2 ? "--reflink=always" : "--reflink=auto";
 	}
 
 	if (files_from && (!am_sender || filesfrom_host)) {
