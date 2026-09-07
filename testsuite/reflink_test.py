@@ -92,6 +92,16 @@ if not has_shared_extent(physical_extents(moved_dest),
                          physical_extents(TODIR / 'moved.moved-old')):
     test_fail('range-reflink transfer did not preserve shared extents')
 
+# New files have no destination basis to clone, but must still be created
+# normally when reflink=always is requested.
+new_source = FROMDIR / 'new' / 'nested' / 'file'
+new_dest = TODIR / 'new' / 'nested' / 'file'
+new_source.parent.mkdir(parents=True, exist_ok=True)
+new_source.write_bytes(b'new file without a destination basis\n')
+run_rsync('-a', '--reflink=always', f'{FROMDIR}/', f'{TODIR}/')
+if new_dest.read_bytes() != new_source.read_bytes():
+    test_fail('reflink transfer did not create a new nested file')
+
 # --update must still skip a destination that is newer than the source.
 source.write_bytes(b'C' + source.read_bytes()[1:])
 os.utime(source, (now + 20, now + 20))

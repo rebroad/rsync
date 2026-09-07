@@ -469,12 +469,16 @@ int open_tmpfile(char *fnametmp, const char *fname, struct file_struct *file)
  * rsync delta to the clone.  A missing basis cannot be reflinked. */
 static int reflink_tmpfile(int basis_fd, int output_fd)
 {
+	/* New files have no destination basis to clone.  They still need to
+	 * be created when reflink=always is requested; the transfer itself
+	 * will populate the ordinary temporary file. */
+	if (basis_fd < 0)
+		return 1;
+
 #if defined(__linux__) && defined(FICLONE)
-	if (basis_fd >= 0 && ioctl(output_fd, FICLONE, basis_fd) == 0)
+	if (ioctl(output_fd, FICLONE, basis_fd) == 0)
 		return 0;
 	if (reflink_mode == 2) {
-		if (basis_fd < 0)
-			errno = ENOENT;
 		return -1;
 	}
 #else
