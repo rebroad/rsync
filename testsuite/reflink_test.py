@@ -77,6 +77,18 @@ if (TODIR / 'file.old').read_bytes() != basis:
 if not has_shared_extent(physical_extents(dest), physical_extents(TODIR / 'file.old')):
     test_fail('reflink transfer did not preserve any shared extents')
 
+# A shorter replacement must truncate the CoW-seeded temporary file rather
+# than leaving the suffix from the old destination behind.
+short_source = FROMDIR / 'short'
+short_dest = TODIR / 'short'
+short_source.write_bytes(b'S' * 4096)
+short_dest.write_bytes(b'B' * 16384)
+os.utime(short_dest, (now - 20, now - 20))
+run_rsync('-a', '--no-whole-file', '--reflink=always',
+          str(short_source), str(short_dest))
+if short_dest.read_bytes() != short_source.read_bytes():
+    test_fail('shorter reflink transfer did not truncate the destination')
+
 # An aligned insertion moves the matching ranges. With a matching block size,
 # this exercises FICLONERANGE rather than the same-offset seek path.
 moved_source = FROMDIR / 'moved'

@@ -706,10 +706,13 @@ static int receive_data(int f_in, char *fname_r, int fd_r, OFF_T size_r,
 	}
 
 #ifdef HAVE_FTRUNCATE
-	/* inplace: New data could be shorter than old data.
+	/* inplace/reflink: New data could be shorter than old data. A reflink
+	 * replacement is seeded from the old destination, so it needs the same
+	 * final truncation as an in-place transfer.
 	 * preallocate_files: total_size could have been an overestimate.
 	 *     Cut off any extra preallocated zeros from dest file. */
-	if ((inplace_sizing || preallocated_len > offset) && fd != -1 && !IS_DEVICE(file->mode)) {
+	if ((inplace_sizing || preallocated_len > offset || reflink_seeded)
+		&& fd != -1 && !IS_DEVICE(file->mode)) {
 		if (do_ftruncate(fd, offset) < 0)
 			rsyserr(FERROR_XFER, errno, "ftruncate failed on %s", full_fname(fname));
 	}
